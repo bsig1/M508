@@ -7,6 +7,7 @@ a combination of inputs such that all constraints of the problem are satisfied. 
 - All rows contain 1..9
 - All columns contain 1..9
 - All boxes contain 1..9
+
 Computationally CSP's quickly become very difficult, and are known to be np-complete.
 
 Using the constraint model of Sudoku build a graph, where each edge is a constraint between two cells.
