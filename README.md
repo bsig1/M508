@@ -48,3 +48,5 @@ simple backtracking, that very loosely connected puzzles are going to take much 
 
 Once enough data is collected, we will use kernel regression methods to combine different functions to try to directly model
 this relationship between "connectedness" and "compuational difficulty" for different algorithms.
+Similar research shows this relationship will have some polynomial and some log component, the specifics will come from our data.
+
