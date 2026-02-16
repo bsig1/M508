@@ -78,21 +78,21 @@ In the db, there are 11 columns of data:
 - puzzle_path: This is where it is stored locally on my computer
 
 - weight_mode: There are six weighting models, 2 directional, 4 undirectional
--- Binary: This encodes the rules of sudoku, all cell neighbor relationships are encoded with weight 1.
--- Overlap: This encodes how much two cells overlap in their domain.
--- Expected Fraction: This encodes the probability random assignment of one of the cells will invalidate the other.
--- Target Fraction: A similar alg to dir_expected_frac, but more aggressive, weighting fragile bottlenecks high
--- Directional Information: A measure of information influence, based on entropy models
+    - Binary: This encodes the rules of sudoku, all cell neighbor relationships are encoded with weight 1.
+    - Overlap: This encodes how much two cells overlap in their domain.
+    - Expected Fraction: This encodes the probability random assignment of one of the cells will invalidate the other.
+    - Target Fraction: A similar alg to dir_expected_frac, but more aggressive, weighting fragile bottlenecks high
+    - Directional Information: A measure of information influence, based on entropy models
 
 - include_filled_edges: Whether or not filled cells will have influence on the graph. If true, the constraints
 are all filled in, if false, it only checks constraints on empty cells.
 
 - Algorithm: There are 3 increasingly complex treatments of the sudoku problem used:
--- Backtracking: Fill in a cell, check for constraint violations, if none continue, if yes try a different number. 
+    - Backtracking: Fill in a cell, check for constraint violations, if none continue, if yes try a different number. 
 Bare minimum simplicity, naive approach but still effective
--- Forward Checking: Fill in a cell, check if any cell has domain size 0, if one does, try a different number.
+    - Forward Checking: Fill in a cell, check if any cell has domain size 0, if one does, try a different number.
 More complex, while still being able to quickly make decisions.
--- Arc Consistency: This is forward checking with constraint propogation, check if any cell has domain size 1, remove it from 
+    - Arc Consistency: This is forward checking with constraint propogation, check if any cell has domain size 1, remove it from 
 the domain of its neighbors recursively. Then if any cell has domain size 0, try a different number.
 This is the most complex solver, it can weed out contradictions quickly, but requires more compute per decision.
 
