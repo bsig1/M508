@@ -90,8 +90,8 @@ https://www.kaggle.com/datasets/rohanrao/sudoku
 
 Local organization:
 
-- 750 random puzzles → `Custom/`
-- 250 hardest puzzles → `EvilTop/`
+- 750 random puzzles → Custom
+- 250 hardest puzzles → EvilTop
 
 ---
 
