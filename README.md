@@ -57,6 +57,9 @@ The Fiedler value is hypothesized to correlate strongly with computational diffi
 
 A highly connected puzzle should propagate constraints quickly. A loosely connected puzzle may delay constraint propagation, making it harder for simple algorithms.
 
+*Note that for these properties of the Laplacian matrix to hold, it must be Symetric SPD, which in the directed case, it usually isn't, we approximate to the nearest
+symetrical matrix with 1/2 * A A^T to ensure consistent analysis.*
+
 ---
 
 ## Experimental Approach
