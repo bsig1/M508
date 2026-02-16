@@ -2,12 +2,13 @@ from __future__ import annotations
 import random
 import math
 import os
+import time
 from typing import List,Set, Tuple
 import matplotlib.pyplot as plt
 from pathlib import Path
 import igraph as ig
 import numpy as np
-
+import sqlite3
 
 
 
@@ -175,20 +176,6 @@ class Board:
                     else:
                         self.puzzle[y][x] = int(value)
 
-    def output_puzzle_file(self) -> str:
-        puzzle_name = ""
-        for ch in reversed(PUZZLE_PATH):
-            if ch in ('/', '\\'):
-                break
-            puzzle_name = ch + puzzle_name
-        puzzle_name = puzzle_name.split('.')[0]  # Removes txt extension
-
-        os.makedirs('output', exist_ok=True) # Makes sure output directory exists
-        outfile_name = f'output/{GROUP_ID}_{ALGORITHM}_{PUZZLE_TYPE}_{puzzle_name}.txt'
-        with open(outfile_name, 'w') as f:
-            f.write(str(self))
-        return outfile_name
-
     def check_solution(self) -> bool:
         """
         Separate checker from the solvers themselves, to ensure puzzles are correct.
@@ -233,7 +220,6 @@ class Board:
 
         return True
 
-
     def _domain_mask(self, r: int, c: int) -> int:
         """
         Bitmask of allowed values for cell (r,c), bits 0..8 correspond to 1..9.
@@ -251,18 +237,25 @@ class Board:
     def _popcount9(x: int) -> int:
         return x.bit_count()
 
+
     def to_constraint_graph_igraph(
         self,
-        weight_mode: str = "inv_overlap",   # "inv_overlap", "overlap", "binary"
+        weight_mode: str = "inv_overlap",   # "inv_overlap","overlap","binary",
+                                           # "dir_expected_frac","dir_target_frac","dir_info"
         eps: float = 1e-6,
         include_filled_edges: bool = True,
+        alpha: float = 1.0,                # used by dir_target_frac (si^alpha)
     ) -> ig.Graph:
         """
         Returns an igraph.Graph representing THIS board state.
 
         Vertices: 0..80 (id = 9*r + c)
-        Edges: between peer cells (same row/col/box)
-        Weights: derived from candidate-domain overlap (board-specific)
+
+        If weight_mode is undirected:
+          Edges: undirected between peer cells (same row/col/box)
+
+        If weight_mode is directional (starts with "dir_"):
+          Edges: directed; for each peer pair {i,j}, adds i->j and j->i.
 
         Vertex attributes added:
           - "r","c","box"
@@ -273,7 +266,7 @@ class Board:
 
         Edge attributes added:
           - "weight" (float) unless weight_mode == "binary"
-          - "relation" one of {"row","col","box"} (if an edge is multiple types, it stores "multi")
+          - "relation" one of {"row","col","box","multi"}
         """
         n = 81
         full9 = (1 << 9) - 1
@@ -284,7 +277,12 @@ class Board:
         def box_id(r: int, c: int) -> int:
             return (r // 3) * 3 + (c // 3)
 
-        # Precompute per-cell domains
+        def safe_pop(m: int) -> int:
+            return self._popcount9(m & full9)
+
+        is_directed = weight_mode.startswith("dir_")
+
+        # ---- Precompute per-cell domains ----
         dom = [0] * n
         val = [EMPTY_VALUE] * n
         fixed = [False] * n
@@ -296,12 +294,13 @@ class Board:
                 fixed[i] = (v != EMPTY_VALUE)
                 dom[i] = self._domain_mask(r, c) & full9
 
-        # Build edges (peers) + relation type
-        seen = {}  # (a,b) -> relation string
-        edges = []
-        relations = []
+        dom_size = [safe_pop(m) for m in dom]
 
-        def add_edge(i: int, j: int, rel: str):
+        # ---- Build unique peer pairs + relation type ----
+        seen = {}  # (a,b) -> relation string
+        undirected_pairs = []
+
+        def add_pair(i: int, j: int, rel: str):
             a, b = (i, j) if i < j else (j, i)
             key = (a, b)
             if key in seen:
@@ -309,35 +308,33 @@ class Board:
                     seen[key] = "multi"
                 return
             seen[key] = rel
-            edges.append((a, b))
-            relations.append(rel)
+            undirected_pairs.append((a, b))
 
         for r in range(9):
             for c in range(9):
                 i = vid(r, c)
-                # Optionally skip edges incident to filled cells
                 if (not include_filled_edges) and fixed[i]:
                     continue
 
-                # same row
+                # row peers
                 for cc in range(9):
                     if cc == c:
                         continue
                     j = vid(r, cc)
                     if (not include_filled_edges) and fixed[j]:
                         continue
-                    add_edge(i, j, "row")
+                    add_pair(i, j, "row")
 
-                # same col
+                # col peers
                 for rr in range(9):
                     if rr == r:
                         continue
                     j = vid(rr, c)
                     if (not include_filled_edges) and fixed[j]:
                         continue
-                    add_edge(i, j, "col")
+                    add_pair(i, j, "col")
 
-                # same box
+                # box peers
                 br = (r // 3) * 3
                 bc = (c // 3) * 3
                 for rr in range(br, br + 3):
@@ -347,37 +344,94 @@ class Board:
                         j = vid(rr, cc)
                         if (not include_filled_edges) and fixed[j]:
                             continue
-                        add_edge(i, j, "box")
+                        add_pair(i, j, "box")
 
-        G = ig.Graph(n=n, edges=edges, directed=False)
+        # ---- Expand to directed edges if requested ----
+        if is_directed:
+            edges = []
+            relations = []
+            for (a, b) in undirected_pairs:
+                rel = seen[(a, b)]
+                edges.append((a, b))
+                relations.append(rel)
+                edges.append((b, a))
+                relations.append(rel)
+            G = ig.Graph(n=n, edges=edges, directed=True)
+        else:
+            edges = undirected_pairs
+            relations = [seen[(a, b)] for (a, b) in edges]
+            G = ig.Graph(n=n, edges=edges, directed=False)
 
-        # Vertex attributes
+        # ---- Vertex attributes ----
         G.vs["r"] = [i // 9 for i in range(n)]
         G.vs["c"] = [i % 9 for i in range(n)]
         G.vs["box"] = [box_id(i // 9, i % 9) for i in range(n)]
         G.vs["value"] = val
         G.vs["fixed"] = fixed
         G.vs["dom_mask"] = dom
-        G.vs["dom_size"] = [self._popcount9(m) for m in dom]
+        G.vs["dom_size"] = dom_size
 
-        # Edge attributes
-        G.es["relation"] = [seen[(min(a,b), max(a,b))] for (a,b) in edges]
+        # ---- Edge attributes ----
+        G.es["relation"] = relations
 
         if weight_mode != "binary":
             weights = []
-            for (a, b) in edges:
-                inter = dom[a] & dom[b]
-                k = self._popcount9(inter)  # overlap size 0..9
 
-                if weight_mode == "overlap":
-                    w = k / 9.0
-                elif weight_mode == "inv_overlap":
-                    # smaller overlap => larger weight (tighter constraint coupling)
-                    w = 1.0 / (k + eps)
-                else:
-                    raise ValueError("weight_mode must be one of: 'inv_overlap', 'overlap', 'binary'")
+            if not is_directed:
+                # undirected weighting
+                for (a, b) in edges:
+                    inter = dom[a] & dom[b]
+                    k = safe_pop(inter)  # overlap size 0..9
 
-                weights.append(float(w))
+                    if weight_mode == "overlap":
+                        w = k / 9.0
+                    elif weight_mode == "inv_overlap":
+                        w = 1.0 / (k + eps)
+                    else:
+                        raise ValueError(
+                            "weight_mode must be one of: "
+                            "'inv_overlap','overlap','binary',"
+                            "'dir_expected_frac','dir_target_frac','dir_info'"
+                        )
+                    weights.append(float(w))
+
+            else:
+                # For an edge (src -> dst):
+                #   si = |D_src|, sj = |D_dst|, k = |D_src ∩ D_dst|
+                # Choose one of:
+                #   dir_expected_frac: w = k / (si * sj)          (expected fraction of dst eliminated)
+                #   dir_target_frac:   w = (k/si) * 1/(sj^alpha)  (aggressive target impact; alpha>=0)
+                #   dir_info:          w = (k/sj) * log(9/si)     (info-weighted; small src stronger)
+                import math
+
+                for (src, dst) in edges:
+                    si = dom_size[src]
+                    sj = dom_size[dst]
+
+                    # if a cell is fixed, its computed domain may be 0 depending on your _domain_mask impl
+                    if si <= 0 or sj <= 0:
+                        weights.append(0.0)
+                        continue
+
+                    k = safe_pop(dom[src] & dom[dst])
+
+                    if weight_mode == "dir_expected_frac":
+                        w = k / (si * sj)
+                    elif weight_mode == "dir_target_frac":
+                        # "how much dst is affected" (1/sj) with optional extra emphasis
+                        w = (k / sj) * (1.0 / ((si + eps) ** alpha))
+                    elif weight_mode == "dir_info":
+                        # log term ~0 when src has 9 options; larger when src is tight
+                        w = (k / sj) * math.log((9.0 + eps) / (si + eps))
+                    else:
+                        raise ValueError(
+                            "weight_mode must be one of: "
+                            "'inv_overlap','overlap','binary',"
+                            "'dir_expected_frac','dir_target_frac','dir_info'"
+                        )
+
+                    weights.append(float(w))
+
             G.es["weight"] = weights
 
         return G
@@ -705,30 +759,165 @@ class AC3Solver:
         self.empty_squares.add((row, col))
         return False
 
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+
+    # One row per run (puzzle x weight_mode x include_filled_edges x algorithm)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS puzzle_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        puzzle_path TEXT NOT NULL,
+        weight_mode TEXT NOT NULL,
+        include_filled_edges INTEGER NOT NULL, -- 0/1
+        algorithm TEXT NOT NULL,
+
+        solved INTEGER NOT NULL,              -- 0/1
+        solve_time_ms REAL NOT NULL,
+        decision_count INTEGER NOT NULL,
+
+        fiedler_value REAL NOT NULL,
+        trace_laplacian REAL NOT NULL,
+
+        created_at_utc TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+
+        UNIQUE(puzzle_path, weight_mode, include_filled_edges, algorithm)
+    );
+    """)
+
+    # Helpful index for analysis queries
+    cur.execute("""
+    CREATE INDEX IF NOT EXISTS idx_puzzle_runs_lookup
+    ON puzzle_runs(puzzle_path, weight_mode, include_filled_edges, algorithm);
+    """)
+
+    conn.commit()
+
+def graph_metrics_for_board(board, weight_mode: str, include_filled_edges: bool):
+    """
+    Returns (fiedler_value, trace_L).
+
+    Uses weighted adjacency from igraph.
+    If graph is directed, symmetrizes A so Laplacian is symmetric PSD.
+    """
+    G = board.to_constraint_graph_igraph(
+        weight_mode=weight_mode,
+        include_filled_edges=include_filled_edges
+    )
+
+    # weighted adjacency; if weight_mode=="binary" there may be no "weight" attribute
+    attr = None if weight_mode == "binary" else "weight"
+    A = np.array(G.get_adjacency(attribute=attr).data, dtype=float)
+
+    # If directed (or asymmetric due to any reason), make symmetric for spectral metrics
+    if getattr(G, "is_directed", lambda: False)():
+        A = 0.5 * (A + A.T)
+    else:
+        # still ensure symmetry numerically
+        A = 0.5 * (A + A.T)
+
+    # Laplacian
+    degrees = A.sum(axis=1)
+    L = np.diag(degrees) - A
+
+    # Trace(L) = sum(degrees) for standard Laplacian
+    trace_L = float(np.trace(L))
+
+    # Eigenvalues (symmetric)
+    evals = np.linalg.eigvalsh(L)
+
+    # Fiedler value = 2nd smallest eigenvalue (λ2).
+    # Numerical noise can make λ1 slightly negative; clamp tiny negatives.
+    evals = np.maximum(evals, 0.0)
+
+    # If graph is connected, λ1=0 and λ2>0. If disconnected, λ2 may be 0.
+    fiedler = float(evals[1]) if evals.shape[0] >= 2 else 0.0
+
+    return fiedler, trace_L
+
+def run_one_solver(board_path: str, SolverCls):
+    """
+    Returns (solved: bool, time_ms: float, decision_count: int)
+    Uses a fresh Board for every solver run.
+    """
+    board = Board(file_path=board_path)
+    solver = SolverCls(board)
+
+    t0 = time.perf_counter_ns()
+    solved = bool(solver.solve())
+    t1 = time.perf_counter_ns()
+
+    time_ms = (t1 - t0) / 1_000_000.0
+    decision_count = int(getattr(solver, "decision_count", -1))
+
+    return solved, time_ms, decision_count
+
 def test_suite():
+    conn = sqlite3.connect("puzzle_info.db")
+    ensure_schema(conn)
+    cur = conn.cursor()
+
     algs = [BacktrackingSolver, ForwardCheckingSolver, AC3Solver]
     puzzle_dir = "custompuzzles"
-    
-    puzzles = [str(p.resolve()) for p in Path(puzzle_dir).rglob("*") if p.is_file()]
-    boards = [Board(file_path=puzzle) for puzzle in puzzles]
 
-    smallest_eigenvalues = ("", float('inf'))
-    largest_eigenvalues = ("", float('-inf'))
+    # Choose the weight modes you want to evaluate
+    weight_modes = [
+        "binary",
+        "overlap",
+        "inv_overlap",
+        # if you added the directed modes:
+        # "dir_expected_frac", "dir_target_frac", "dir_info",
+    ]
 
-    
-    for board in boards[:1]:
-        G = board.to_constraint_graph_igraph(weight_mode="inv_overlap", include_filled_edges=True)
+    include_filled_edges_options = [True, False]
 
+    puzzles = sorted(str(p.resolve()) for p in Path(puzzle_dir).rglob("*") if p.is_file())
+    print(f"Found {len(puzzles)} puzzles")
 
-        A = np.array(G.get_adjacency(attribute="weight").data, dtype=float)  # weighted adjacency
-        D = np.diag(A.sum(axis=1))
-        L = D - A  # weighted Laplacian
+    for puzzle_path in puzzles:
+        # Compute graph metrics per (weight_mode, include_filled_edges) once per puzzle
+        for include_filled_edges in include_filled_edges_options:
+            for weight_mode in weight_modes:
+                board_for_graph = Board(file_path=puzzle_path)
+                fiedler, trace_L = graph_metrics_for_board(
+                    board_for_graph, weight_mode=weight_mode, include_filled_edges=include_filled_edges
+                )
 
-        print(len(A))
+                for SolverCls in algs:
+                    algo_name = SolverCls.__name__
 
-        evals = np.linalg.eigvalsh(L)
-        
-    
+                    solved, time_ms, decisions = run_one_solver(puzzle_path, SolverCls)
 
+                    cur.execute("""
+                    INSERT INTO puzzle_runs (
+                        puzzle_path, weight_mode, include_filled_edges, algorithm,
+                        solved, solve_time_ms, decision_count,
+                        fiedler_value, trace_laplacian
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(puzzle_path, weight_mode, include_filled_edges, algorithm)
+                    DO UPDATE SET
+                        solved=excluded.solved,
+                        solve_time_ms=excluded.solve_time_ms,
+                        decision_count=excluded.decision_count,
+                        fiedler_value=excluded.fiedler_value,
+                        trace_laplacian=excluded.trace_laplacian,
+                        created_at_utc=strftime('%Y-%m-%dT%H:%M:%fZ','now');
+                    """, (
+                        puzzle_path,
+                        weight_mode,
+                        1 if include_filled_edges else 0,
+                        algo_name,
+                        1 if solved else 0,
+                        float(time_ms),
+                        int(decisions),
+                        float(fiedler),
+                        float(trace_L),
+                    ))
 
-test_suite()
+                conn.commit()
+                print(f"[OK] {Path(puzzle_path).name} | {weight_mode} | filled={include_filled_edges}")
+
+    conn.close()
+
+if __name__ == "__main__":
+    test_suite()
+
