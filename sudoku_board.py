@@ -859,13 +859,11 @@ def test_suite():
     algs = [BacktrackingSolver, ForwardCheckingSolver, AC3Solver]
     puzzle_dir = "custompuzzles"
 
-    # Choose the weight modes you want to evaluate
+
     weight_modes = [
-        "binary",
-        "overlap",
-        "inv_overlap",
-        # if you added the directed modes:
-        # "dir_expected_frac", "dir_target_frac", "dir_info",
+        "dir_expected_frac", 
+        "dir_target_frac", 
+        "dir_info",
     ]
 
     include_filled_edges_options = [True, False]

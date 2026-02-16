@@ -1,3 +1,6 @@
+# Project Description
+
+## Overview
 In this project, we will be analyzing the computational difficulty of different sudoku puzzles, and trying to find
 a function that can predict the relative difficulty of a given puzzle.
 Firstly we need to define a measure to be placed on a puzzle that has some dependence to the difficulty.
@@ -17,8 +20,11 @@ There is no single way to weight these edges, but one idea is to let the weight 
 be proportional to the intersection of their available domains. The more numbers they both can put in their cell,
 the stronger the connection is. The inverse of this is also often considered, where the fewer numbers that exist
 in both cells, the stronger these cells are related, as putting something into one of these cells will immediately
-affect the other one. Other more complicated weight models are sometimes used, these are just some examples.
+affect the other one. Other more complicated weight models are sometimes used, these are just some examples. In this project
+we use many different weight models.
 
+
+## Adjacency and Laplacean Matrix Descriptions
 Now take a puzzle with some starting state, and define a graph with weights between all of the edges using some model
 of weights. Turn this graph into matrix form call it A, since the graph is not directional, the matrix will be symetric. Each
 cell in the matrix represents the strength of the relationship between two cells on the board. The board is 9x9 with
@@ -47,3 +53,59 @@ simple backtracking, that very loosely connected puzzles are going to take much 
 
 Once enough data is collected, we will use kernel regression methods to combine different functions to try to directly model
 this relationship between "connectedness" and "compuational difficulty" for different algorithms.
+
+## Puzzles
+There are 1,000 puzzles on which these experiements were ran, all of
+them were pulled from https://www.kaggle.com/datasets/rohanrao/sudoku,
+- 750 were pulled randomly from this database
+- 250 were pulled as the hardest to solve from the database
+These files are named Custom for the 750, and "EvilTop" for the 250
+
+They represent a large sample of types of sudoku puzzles, with
+hard ones being selected for specifically as the central idea of this
+project is in regards to the difficulty of computing hard sudokus.
+
+## DATA
+The db file has all experiments ran sorted into a sqlite table; all
+of the same information is also output into a csv.
+puzzle_info.db
+sudoku_long.csv
+In the db, there are 11 columns of data:
+- id: is the id of the run as it is stored in the db
+
+- Inverse Overlap: This encodes the opposite, assigning higher weights to smaller codomains.
+
+- puzzle_path: This is where it is stored locally on my computer
+
+- weight_mode: There are six weighting models, 2 directional, 4 undirectional
+-- Binary: This encodes the rules of sudoku, all cell neighbor relationships are encoded with weight 1.
+-- Overlap: This encodes how much two cells overlap in their domain.
+-- Expected Fraction: This encodes the probability random assignment of one of the cells will invalidate the other.
+-- Target Fraction: A similar alg to dir_expected_frac, but more aggressive, weighting fragile bottlenecks high
+-- Directional Information: A measure of information influence, based on entropy models
+
+- include_filled_edges: Whether or not filled cells will have influence on the graph. If true, the constraints
+are all filled in, if false, it only checks constraints on empty cells.
+
+- Algorithm: There are 3 increasingly complex treatments of the sudoku problem used:
+-- Backtracking: Fill in a cell, check for constraint violations, if none continue, if yes try a different number. 
+Bare minimum simplicity, naive approach but still effective
+-- Forward Checking: Fill in a cell, check if any cell has domain size 0, if one does, try a different number.
+More complex, while still being able to quickly make decisions.
+-- Arc Consistency: This is forward checking with constraint propogation, check if any cell has domain size 1, remove it from 
+the domain of its neighbors recursively. Then if any cell has domain size 0, try a different number.
+This is the most complex solver, it can weed out contradictions quickly, but requires more compute per decision.
+
+- Solved: Boolean Value if puzzle solved
+
+- Solve Time: A course metric of how long it took to run the algorithm on the puzzle
+
+- Decision Count: How many numbers were filled in, in the course of solving the puzzle. A more robust metric,
+but it does favor slower decision making, even if it isn't overall faster
+
+- Fiedler Value: The second smallest eigen value of the Laplacian Matrix. See above.
+
+- Trace Laplacian: The trace of the Laplacian Matrix
+
+- Created At: When that row was added to the Database
+
