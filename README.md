@@ -114,9 +114,6 @@ The SQLite database contains the following columns:
 ### id
 Unique ID of the run as stored in the database.
 
-### Inverse Overlap
-Assigns higher weights to smaller shared domains.
-
 ### puzzle_path
 Local file path to the puzzle.
 
@@ -130,6 +127,9 @@ Six weighting models are implemented (2 directional, 4 undirectional):
 
 - **Overlap**  
   Weight proportional to domain overlap size.
+
+- **Inverse Overlap**
+  Assigns higher weights to smaller shared domains.
 
 - **Expected Fraction**  
   Probability that a random assignment to one cell invalidates another.
