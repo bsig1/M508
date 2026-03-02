@@ -17,9 +17,9 @@ data2 <- data %>% mutate(fe = include_filled_edges) %>% select(-puzzle_path, -in
 #table 1, looking at weight mode + algorithm
 (table1 <- xtabs(~ weight_mode + algorithm, data = data2))
 # table 2, filtering by include_filled_edges == 0
-(table1 <- xtabs(~ weight_mode + algorithm, data = data2, subset = include_filled_edges == 0))
+(table2 <- xtabs(~ weight_mode + algorithm, data = data2, subset = fe == 0))
 # table 3, filtering by include_filled_edges == 1
-(table1 <- xtabs(~ weight_mode + algorithm, data = data2, subset = include_filled_edges == 1))
+(table3 <- xtabs(~ weight_mode + algorithm, data = data2, subset = fe == 1))
 # so we have 1000 each, of include_filled_edges (0 or 1), 
 # over six weight modes
 # and over three algorithms
@@ -90,86 +90,107 @@ plot(log(data2$trace_laplacian))
 nrow(data2 %>% filter(trace_laplacian < exp(10))) #about 30700
 #I think I will use much the same linear, log(), and log(log()) terms as fiedler_value
 
-#################################
-# Regressing by algorithm, weighting method, and filled_edges
-#################################
-# 1. Nest and run regressions for both Y variables
-regression_results <- data2 %>%
+#####################################
+# Actually running the regressions here
+#####################################
+
+
+
+# 1. Formula Definitions
+rhs_vars <- "(log(log(fiedler_value+1)+1) + 
+              log(fiedler_value+1) + 
+              log(log(trace_laplacian+1)+1) + 
+              log(trace_laplacian+1) +
+              fiedler_value + trace_laplacian +
+              I(fiedler_value^2) + I(trace_laplacian^2) +
+              I(1 / (fiedler_value + 0.001)) +
+              I(1 / (trace_laplacian + 0.001)))^2"
+
+form_time  <- as.formula(paste("log(solve_time_ms) ~", rhs_vars))
+form_dec   <- as.formula(paste("log(decision_count) ~", rhs_vars))
+form_ridge <- as.formula(paste("~", rhs_vars))
+
+# 2. Ridge Helper Function
+fit_ridge <- function(df, y_var) {
+  x <- model.matrix(form_ridge, data = df)[, -1]
+  y <- log(df[[y_var]])
+  constant_cols <- apply(x, 2, var) == 0 | is.na(apply(x, 2, var))
+  if (any(constant_cols)) x <- x[, !constant_cols, drop = FALSE]
+  if (ncol(x) == 0) return(NULL) 
+  cv.glmnet(x, y, alpha = 0)
+}
+
+# 3. Modeling Block
+all_models <- data2 %>%
   group_by(algorithm, weight_mode, fe) %>%
   nest() %>%
   mutate(
-    # --- MODEL 1: Solve Time ---
-    model_time = map(data, ~ lm(log(solve_time_ms) ~ 
-                                  (log(log(fiedler_value+1)+1) + 
-                                     log(fiedler_value+1) + 
-                                     log(log(trace_laplacian+1)+1) + 
-                                     log(trace_laplacian+1))^2 +
-                                  I(fiedler_value^2) + I(trace_laplacian^2) +
-                                  I(1 / (fiedler_value + 0.001)), data = .x)),
-    
-    # --- MODEL 2: Decision Count ---
-    model_dec = map(data, ~ lm(log(decision_count) ~ 
-                                 (log(log(fiedler_value+1)+1) + 
-                                    log(fiedler_value+1) + 
-                                    log(log(trace_laplacian+1)+1) + 
-                                    log(trace_laplacian+1))^2 +
-                                 I(fiedler_value^2) + I(trace_laplacian^2) +
-                                 I(1 / (fiedler_value + 0.001)), data = .x))
-  ) %>%                
-  # Extract coefficients for both models
-  mutate(coefs_time = map(model_time, coef),
-         coefs_dec = map(model_dec, coef))
+    lm_time    = map(data, ~ lm(form_time, data = .x)),
+    lm_dec     = map(data, ~ lm(form_dec, data = .x)),
+    ridge_time = map(data, ~ fit_ridge(.x, "solve_time_ms")),
+    ridge_dec  = map(data, ~ fit_ridge(.x, "decision_count"))
+  )
 
-# 2. Extract metrics for Solve Time
-model_summaries_time <- regression_results %>%                
-  mutate(summary = map(model_time, summary),
-         r_sq = map_dbl(summary, ~ .x$r.squared)) %>%                
-  mutate(
-    intercept = map_dbl(coefs_time, ~ .x["(Intercept)"]),
-    slp_fie_2log = map_dbl(coefs_time, ~ .x["log(log(fiedler_value + 1) + 1)"]),
-    slp_fie_log = map_dbl(coefs_time, ~ .x["log(fiedler_value + 1)"]),
-    slp_trace_2log = map_dbl(coefs_time, ~ .x["log(log(trace_laplacian + 1) + 1)"]),
-    slp_trace_log = map_dbl(coefs_time, ~ .x["log(trace_laplacian + 1)"]),
-    slp_fie_quad = map_dbl(coefs_time, ~ .x["I(fiedler_value^2)"]),
-    slp_trace_quad = map_dbl(coefs_time, ~ .x["I(trace_laplacian^2)"]),
-    slp_fie_inv = map_dbl(coefs_time, ~ .x["I(1/(fiedler_value + 0.001))"])
-  ) %>%
-  select(algorithm, weight_mode, fe, r_sq, 
-         intercept, slp_fie_2log, slp_fie_log, 
-         slp_trace_2log, slp_trace_log, 
-         slp_fie_quad, slp_trace_quad, slp_fie_inv)                
+# 4. Universal Extraction and Export Function
+export_unified_csv <- function(df, model_col, is_ridge = FALSE, output_filename) {
+  
+  # Identify all possible 36 experimental configurations
+  master_configs <- data2 %>%
+    distinct(algorithm, weight_mode, fe) %>%
+    mutate(config_name = paste(algorithm, weight_mode, paste0("FE", fe), sep = "_"))
+  
+  extracted_data <- df %>%
+    mutate(results = map(!!sym(model_col), function(m) {
+      if (is.null(m)) return(NULL)
+      
+      if (is_ridge) {
+        # Extract Ridge coefficients and Deviance Ratio (R-Squared equivalent)
+        c_mat <- coef(m, s = "lambda.min")
+        coefs <- tibble(term = rownames(c_mat), estimate = as.vector(c_mat))
+        r2    <- m$glmnet.fit$dev.ratio[which(m$lambda == m$lambda.min)]
+      } else {
+        # Extract OLS coefficients and R-Squared
+        s     <- summary(m)
+        coefs <- tibble(term = names(coef(m)), estimate = unname(coef(m)))
+        r2    <- s$r.squared
+      }
+      
+      # Combine coefficients with a blank row and R2
+      bind_rows(
+        coefs,
+        tibble(term = "zzz_blank", estimate = NA),
+        tibble(term = "zzz_R_Squared", estimate = r2)
+      )
+    })) %>%
+    select(algorithm, weight_mode, fe, results) %>%
+    unnest(results) %>%
+    ungroup() %>%
+    mutate(config_name = paste(algorithm, weight_mode, paste0("FE", fe), sep = "_"))
+  
+  # Pivot into wide format
+  wide_matrix <- extracted_data %>%
+    select(term, config_name, estimate) %>%
+    pivot_wider(names_from = config_name, values_from = estimate)
+  
+  # Add missing columns for any configurations that were NULL in Ridge
+  missing_cols <- setdiff(master_configs$config_name, names(wide_matrix))
+  for (col in missing_cols) {
+    wide_matrix[[col]] <- NA
+  }
+  
+  # Clean up row names, handle blank row, and sort columns alphabetically
+  wide_matrix <- wide_matrix %>%
+    mutate(term = str_remove(term, "zzz_")) %>%
+    mutate(term = ifelse(term == "blank", "", term)) %>%
+    select(term, sort(master_configs$config_name))
+  
+  write_csv(wide_matrix, output_filename)
+  message("Successfully exported: ", output_filename)
+  return(wide_matrix)
+}
 
-# 3. Extract metrics for Decision Count
-model_summaries_dec <- regression_results %>%                
-  mutate(summary = map(model_dec, summary),
-         r_sq = map_dbl(summary, ~ .x$r.squared)) %>%                
-  mutate(
-    intercept = map_dbl(coefs_dec, ~ .x["(Intercept)"]),
-    slp_fie_2log = map_dbl(coefs_dec, ~ .x["log(log(fiedler_value + 1) + 1)"]),
-    slp_fie_log = map_dbl(coefs_dec, ~ .x["log(fiedler_value + 1)"]),
-    slp_trace_2log = map_dbl(coefs_dec, ~ .x["log(log(trace_laplacian + 1) + 1)"]),
-    slp_trace_log = map_dbl(coefs_dec, ~ .x["log(trace_laplacian + 1)"]),
-    slp_fie_quad = map_dbl(coefs_dec, ~ .x["I(fiedler_value^2)"]),
-    slp_trace_quad = map_dbl(coefs_dec, ~ .x["I(trace_laplacian^2)"]),
-    slp_fie_inv = map_dbl(coefs_dec, ~ .x["I(1/(fiedler_value + 0.001))"])
-  ) %>%
-  select(algorithm, weight_mode, fe, r_sq, 
-         intercept, slp_fie_2log, slp_fie_log, 
-         slp_trace_2log, slp_trace_log, 
-         slp_fie_quad, slp_trace_quad, slp_fie_inv)                
-
-# 4. Print formatted tables
-cat("--- Solve Time Model Summaries ---\n")
-print(kable(model_summaries_time, digits = 3, format = "simple"))
-cat("\n--- Decision Count Model Summaries ---\n")
-print(kable(model_summaries_dec, digits = 3, format = "simple"))
-
-
-#################################################
-#################################################
-#################################################
-#################################################
-#################################################
-#################################################
-#################################################
-
+# 5. Execution
+export_unified_csv(all_models, "lm_time", FALSE, "ols_time_unified.csv")
+export_unified_csv(all_models, "lm_dec", FALSE, "ols_decision_unified.csv")
+export_unified_csv(all_models, "ridge_time", TRUE, "ridge_time_unified.csv")
+export_unified_csv(all_models, "ridge_dec", TRUE, "ridge_decision_unified.csv")
